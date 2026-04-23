@@ -1,71 +1,74 @@
 motor = "6_948929816730218549"
 sensor = "2_2564895989332655657"
-hou = "dpad_up"
-zuo = "dpad_left"
-qian = "dpad_down"
-you = "dpad_right"
+backward = "dpad_up"
+left = "dpad_left"
+forward = "dpad_down"
+right = "dpad_right"
 
 def autonomous():
+    # helper inside autonomous (allowed)
+    def clamp(x, lo=-1.0, hi=1.0):
+        return max(lo, min(hi, x))
+
+    # Motor configuration
     Robot.set_value(motor, "invert_a", True)
     Robot.set_value(motor, "pid_enabled_a", False)
     Robot.set_value(motor, "pid_enabled_b", False)
-    if Robot.get_value(sensor,"left") > 0.5:
-        Robot.set_value(motor, "velocity_a", 1)
 
-    last_seen = "center"
+    # PID constants (starter values)
+    Kp = 0.6
+    Ki = 0.0          # keep 0 until Kp/Kd feels stable
+    Kd = 0.10
+
+    dt = 0.02
+    base_speed = 0.5
+
+    # Sensor calibration (YOU MUST SET floor_val)
+    line_val = 0.96527
+    floor_val = 0.30   # <-- replace with your measured floor reading
+    target = (line_val + floor_val) / 2
+
+    last_error = 0.0
+    integral = 0.0
 
     while True:
-        left_sensor = Robot.get_value("line_follower", "left")
-        center_sensor = Robot.get_value("line_follower", "center")
-        right_sensor = Robot.get_value("line_follower", "right")
+        reading = Robot.get_value(sensor, "middle")
 
-        left_on = left_sensor > 0.5
-        center_on = center_sensor > 0.5
-        right_on = right_sensor > 0.5
+        # If sensor reading fails, stop briefly (safe)
+        if reading is None:
+            Robot.set_value(motor, "velocity_a", 0.0)
+            Robot.set_value(motor, "velocity_b", 0.0)
+            Robot.sleep(dt)
+            continue
 
-        if center_on and not left_on and not right_on:
-            Robot.set_value(motor, "velocity_a", 0.7)
-            Robot.set_value(motor, "velocity_b", 0.7)
-            last_seen = "center"
+        # Lost-line/simple safety: if reading is extremely low, slow + gentle search
+        # (tweak thresholds once you know floor reading)
+        if reading < min(line_val, floor_val) + 0.02:
+            Robot.set_value(motor, "velocity_a", 0.2)
+            Robot.set_value(motor, "velocity_b", -0.2)
+            Robot.sleep(dt)
+            continue
 
-        elif left_on and not center_on:
-            Robot.set_value(motor, "velocity_a", 0.75)
-            Robot.set_value(motor, "velocity_b", 0.25)
-            last_seen = "left"
+        # Higher value = more on the line (your sensor behavior)
+        error = reading - target
 
-        elif right_on and not center_on:
-            Robot.set_value(motor, "velocity_a", 0.25)
-            Robot.set_value(motor, "velocity_b", 0.75)
-            last_seen = "right"
+        # Integral with anti-windup clamp
+        integral = clamp(integral + error * dt, -0.3, 0.3)
 
-        elif left_on and center_on and not right_on:
-            Robot.set_value(motor, "velocity_a", 0.7)
-            Robot.set_value(motor, "velocity_b", 0.35)
-            last_seen = "left"
+        # Derivative scaled by dt
+        derivative = (error - last_error) / dt
 
-        elif right_on and center_on and not left_on:
-            Robot.set_value(motor, "velocity_a", 0.35)
-            Robot.set_value(motor, "velocity_b", 0.7)
-            last_seen = "right"
+        correction = (Kp * error) + (Ki * integral) + (Kd * derivative)
 
-        elif left_on and center_on and right_on:
-            Robot.set_value(motor, "velocity_a", 0.65)
-            Robot.set_value(motor, "velocity_b", 0.65)
-            last_seen = "center"
+        left_speed = clamp(base_speed + correction)
+        right_speed = clamp(base_speed - correction)
 
-        else:
-            if last_seen == "left":
-                Robot.set_value(motor, "velocity_a", 0.7)
-                Robot.set_value(motor, "velocity_b", 0.2)
-            elif last_seen == "right":
-                Robot.set_value(motor, "velocity_a", 0.2)
-                Robot.set_value(motor, "velocity_b", 0.7)
-            else:
-                Robot.set_value(motor, "velocity_a", 0)
-                Robot.set_value(motor, "velocity_b", 0)
+        Robot.set_value(motor, "velocity_a", left_speed)
+        Robot.set_value(motor, "velocity_b", right_speed)
 
-        Robot.sleep(0.02)
-    
+        last_error = error
+        Robot.sleep(dt)
+        
 def teleop():
     Robot.set_value(motor, "invert_a", True)
     Robot.set_value(motor, "pid_enabled_a", False)
