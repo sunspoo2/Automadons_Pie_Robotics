@@ -1,13 +1,16 @@
 motor = "6_948929816730218549"
-backward = "dpad_up"
-left = "dpad_left"
-forward = "dpad_down"
-right = "dpad_right"
+sensor = "2_2564895989332655657"
+hou = "dpad_up"
+zuo = "dpad_left"
+qian = "dpad_down"
+you = "dpad_right"
 
 def autonomous():
     Robot.set_value(motor, "invert_a", True)
     Robot.set_value(motor, "pid_enabled_a", False)
     Robot.set_value(motor, "pid_enabled_b", False)
+    if Robot.get_value(sensor,"left") > 0.5:
+        Robot.set_value(motor, "velocity_a", 1)
 
     last_seen = "center"
 
