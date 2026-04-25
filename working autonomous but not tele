@@ -1,0 +1,247 @@
+# ─── Hardware UIDs (from Dawn IDE) ───────────────────────────────────────────
+motor  = "6_948929816730218549"       # KoalaBear – drive motors
+crane  = "6_13507231519301190666"     # KoalaBear – crane / arm
+sensor = "2_2564895989332655657"      # Line follower
+
+# ─── Sensor channel names ─────────────────────────────────────────────────────
+LEFT_CH   = "left"
+CENTER_CH = "center"
+RIGHT_CH  = "right"
+
+# ─── Per-channel calibration ──────────────────────────────────────────────────
+#   Measured from your hardware:
+#
+#             on-line    floor
+#   center:   ~0.65      ~0.24
+#   left:     ~0.46      ~0.13
+#   right:    ~0.46      ~0.13
+#
+#   TARGET = midpoint between floor and on-line for each channel.
+#   The PID error is (reading - TARGET), so 0 means "perfectly centred on line".
+#   Normalising per-channel means all three errors live on the same scale
+#   even though the raw ranges differ.
+
+C_TARGET = (0.65 + 0.24) / 2          # 0.445
+L_TARGET = (0.46 + 0.13) / 2          # 0.295
+R_TARGET = (0.46 + 0.13) / 2          # 0.295
+
+# "On line" threshold — 40% of the way from floor to on-line for each channel.
+# Above this = sensor sees tape.  Below = sensor sees carpet.
+C_THRESH = 0.24 + (0.65 - 0.24) * 0.40   # 0.404
+L_THRESH = 0.13 + (0.46 - 0.13) * 0.40   # 0.262
+R_THRESH = 0.13 + (0.46 - 0.13) * 0.40   # 0.262
+
+
+def autonomous():
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+    def clamp(x, lo=-1.0, hi=1.0):
+        return max(lo, min(hi, x))
+
+    def read3():
+        """Return (left, center, right) raw sensor readings; None becomes 0."""
+        l = Robot.get_value(sensor, LEFT_CH)   or 0.0
+        c = Robot.get_value(sensor, CENTER_CH) or 0.0
+        r = Robot.get_value(sensor, RIGHT_CH)  or 0.0
+        return l, c, r
+
+    def drive(va, vb):
+        Robot.set_value(motor, "velocity_a", clamp(va))
+        Robot.set_value(motor, "velocity_b", clamp(vb))
+
+    def stop():
+        drive(0.0, 0.0)
+
+    # ── motor initialisation ──────────────────────────────────────────────────
+    Robot.set_value(motor, "invert_a",      True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+
+    # ── PID constants ─────────────────────────────────────────────────────────
+    # See the tuning guide at the bottom of this file.
+    Kp = 0.6
+    Ki = 0.0    # leave at 0 until Kp/Kd feel stable
+    Kd = 0.10
+
+    dt         = 0.02    # loop period (seconds)
+    base_speed = -0.5    # negative = forward on this drivetrain
+
+    # ── timing for parking ────────────────────────────────────────────────────
+    # Autonomous lasts 30 s.  Follow the line for PARK_AFTER seconds, then
+    # drive straight into the parking circle for +10 points.
+    # Tune PARK_DRIVE_T so the robot stops fully inside the circle.
+    PARK_AFTER   = 22.0   # seconds of line-following before parking
+    PARK_DRIVE_T =  1.5   # seconds of straight driving into parking zone
+    PARK_SPEED   = -0.3   # slow approach speed (negative = forward)
+
+    # ── state ─────────────────────────────────────────────────────────────────
+    last_error = 0.0
+    integral   = 0.0
+    t_start    = Robot.get_time()
+
+    # last_side tracks which side the line was on the last time ANY sensor saw it.
+    #   -1 = line was to the left  (left sensor was the last active outer sensor)
+    #   +1 = line was to the right (right sensor was the last active outer sensor)
+    #    0 = centered / unknown at start
+    # Updated every tick a sensor sees the line, so it's accurate right up until
+    # all sensors go dark — fixing the "spins the wrong way" bug.
+    last_side = 0
+
+    # Recovery spin speed — slow enough that the robot doesn't blow past the tape
+    # before the sensors have time to react. Raise if recovery feels too sluggish.
+    RECOVERY_SPEED = 0.25
+
+    # == PHASE 1 - three-sensor PID line following =============================
+    while True:
+        elapsed = Robot.get_time() - t_start
+        if elapsed >= PARK_AFTER:
+            break
+
+        l, c, r = read3()
+
+        l_on = l > L_THRESH
+        c_on = c > C_THRESH
+        r_on = r > R_THRESH
+
+        # ── update last_side whenever any sensor sees the line ────────────────
+        # Outer sensors take priority — they're the first to warn of a turn.
+        # Center alone means we're straight, so we don't overwrite last_side.
+        if l_on and not r_on:
+            last_side = -1   # line drifting to the left
+        elif r_on and not l_on:
+            last_side = +1   # line drifting to the right
+
+        # ── lost-line recovery ────────────────────────────────────────────────
+        # All three sensors off the line: spin toward the side we LAST saw it.
+        # Because last_side is updated above every tick, by the time we lose the
+        # line it already reflects which way the turn was going.
+        if not l_on and not c_on and not r_on:
+            if last_side >= 0:
+                drive(-RECOVERY_SPEED,  RECOVERY_SPEED)  # spin right
+            else:
+                drive( RECOVERY_SPEED, -RECOVERY_SPEED)  # spin left
+            Robot.sleep(dt)
+            continue
+
+        # ── per-channel normalised error ──────────────────────────────────────
+        # Each channel's error = (raw_reading - its_own_target).
+        # This puts all three on the same scale regardless of raw range.
+        #
+        # Directional weights:
+        #   center -> primary reference  (w =  1.0)
+        #   left   -> negative weight    (w = -0.5, line left -> steer left)
+        #   right  -> positive weight    (w = +0.5, line right -> steer right)
+        #
+        # Only active (on-line) channels contribute so floor noise is ignored.
+
+        active_err = 0.0
+        active_w   = 0.0
+
+        if l_on:
+            active_err += (l - L_TARGET) * -0.5
+            active_w   += 0.5
+        if c_on:
+            active_err += (c - C_TARGET) *  1.0
+            active_w   += 1.0
+        if r_on:
+            active_err += (r - R_TARGET) *  0.5
+            active_w   += 0.5
+
+        error = active_err / active_w if active_w > 0 else 0.0
+
+        # ── PID ───────────────────────────────────────────────────────────────
+        integral   = clamp(integral + error * dt, -0.3, 0.3)
+        derivative = (error - last_error) / dt
+        correction = Kp * error + Ki * integral + Kd * derivative
+
+        drive(base_speed + correction, base_speed - correction)
+
+        last_error = error
+        Robot.sleep(dt)
+
+    # == PHASE 2 - park ========================================================
+    stop()
+    Robot.sleep(0.1)
+    drive(PARK_SPEED, PARK_SPEED)
+    Robot.sleep(PARK_DRIVE_T)
+    stop()
+
+
+def teleop():
+    Robot.set_value(motor, "invert_a",      True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+    Robot.set_value(crane, "invert_a",      True)
+    Robot.set_value(crane, "pid_enabled_a", False)
+    Robot.set_value(crane, "pid_enabled_b", False)
+
+    while True:
+        if Gamepad.get_value("dpad_down"):          # forward
+            Robot.set_value(motor, "velocity_a", 1)
+            Robot.set_value(motor, "velocity_b", 1)
+            if Gamepad.get_value("dpad_left"):
+                Robot.set_value(motor, "velocity_b", 0.2)
+            if Gamepad.get_value("dpad_right"):
+                Robot.set_value(motor, "velocity_a", 0.2)
+        elif Gamepad.get_value("dpad_left"):        # turn left
+            Robot.set_value(motor, "velocity_a",  1)
+            Robot.set_value(motor, "velocity_b", -1)
+        elif Gamepad.get_value("dpad_right"):       # turn right
+            Robot.set_value(motor, "velocity_a", -1)
+            Robot.set_value(motor, "velocity_b",  1)
+        elif Gamepad.get_value("dpad_up"):          # backward
+            Robot.set_value(motor, "velocity_a", -1)
+            Robot.set_value(motor, "velocity_b", -1)
+            if Gamepad.get_value("dpad_left"):
+                Robot.set_value(motor, "velocity_b", -0.2)
+            if Gamepad.get_value("dpad_right"):
+                Robot.set_value(motor, "velocity_a", -0.2)
+        else:
+            Robot.set_value(motor, "velocity_a", 0)
+            Robot.set_value(motor, "velocity_b", 0)
+
+        if Gamepad.get_value("button_y"):           # crane up
+            Robot.set_value(crane, "velocity_a", 1)
+            Robot.set_value(crane, "velocity_b", 1)
+        elif Gamepad.get_value("button_a"):         # crane down
+            Robot.set_value(crane, "velocity_a", -1)
+            Robot.set_value(crane, "velocity_b", -1)
+        else:
+            Robot.set_value(crane, "velocity_a", 0)
+            Robot.set_value(crane, "velocity_b", 0)
+
+        Robot.sleep(0.02)
+
+
+# ===============================================================================
+#  PID TUNING GUIDE
+# ===============================================================================
+#
+#  Kp - Proportional gain
+#   * Reacts to the current error (how far off the line you are right now).
+#   * Too LOW  -> drifts slowly off the line, feels sluggish.
+#   * Too HIGH -> wiggles / oscillates back and forth across the line.
+#   * TUNE FIRST. Start at 0.4, raise by 0.1 until it wiggles, back off 0.15.
+#
+#  Kd - Derivative gain
+#   * Reacts to how fast the error is changing - damps oscillation.
+#   * Too LOW  -> oscillation from high Kp survives.
+#   * Too HIGH -> twitchy / noisy; amplifies sensor jitter.
+#   * TUNE SECOND. Start at 0.05, raise until the Kp wiggle disappears.
+#     Typical good range: 0.05 - 0.20.
+#
+#  Ki - Integral gain
+#   * Corrects slow long-term drift (robot runs consistently 2 cm to one side).
+#   * Too HIGH -> overshoots on turns; windup makes recovery sluggish.
+#   * TUNE LAST. Leave at 0 until Kp/Kd feel good, then add 0.01 at a time.
+#
+#  Quick symptom -> fix table:
+#   Symptom                        Fix
+#   ----------------------------------------------------
+#   Drifts off line on straights   Raise Kp
+#   Wiggles / oscillates           Lower Kp  OR  raise Kd
+#   Twitchy / noisy movement       Lower Kd
+#   Consistent left/right bias     Add small Ki (0.01-0.05)
+#   Overshoots badly on turns      Lower Ki  OR  lower Kp
+#   Spins forever after losing it  Tighten *_THRESH values
+#
