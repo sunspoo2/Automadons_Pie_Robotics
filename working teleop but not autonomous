@@ -1,0 +1,162 @@
+# ─── Hardware UIDs ────────────────────────────────────────────────────────────
+motor  = "6_948929816730218549"
+crane  = "6_13507231519301190666"
+sensor = "2_2564895989332655657"
+
+# ─── Gamepad bindings ─────────────────────────────────────────────────────────
+backward = "dpad_up"
+left     = "dpad_left"
+forward  = "dpad_down"
+right    = "dpad_right"
+up       = "button_y"
+down     = "button_a"
+
+# ─── Sensor channel names ─────────────────────────────────────────────────────
+LEFT_CH   = "left"
+CENTER_CH = "center"
+RIGHT_CH  = "right"
+
+# ─── Per-channel calibration ──────────────────────────────────────────────────
+#             on-line    floor
+#   center:   ~0.65      ~0.24
+#   left:     ~0.46      ~0.13
+#   right:    ~0.46      ~0.13
+
+C_TARGET = (0.65 + 0.24) / 2               # 0.445
+L_TARGET = (0.46 + 0.13) / 2               # 0.295
+R_TARGET = (0.46 + 0.13) / 2               # 0.295
+
+C_THRESH = 0.24 + (0.65 - 0.24) * 0.40    # 0.404
+L_THRESH = 0.13 + (0.46 - 0.13) * 0.40    # 0.262
+R_THRESH = 0.13 + (0.46 - 0.13) * 0.40    # 0.262
+
+
+def autonomous():
+
+    def clamp(x, lo=-1.0, hi=1.0):
+        return max(lo, min(hi, x))
+
+    def read3():
+        l = Robot.get_value(sensor, LEFT_CH)   or 0.0
+        c = Robot.get_value(sensor, CENTER_CH) or 0.0
+        r = Robot.get_value(sensor, RIGHT_CH)  or 0.0
+        return l, c, r
+
+    def drive(va, vb):
+        Robot.set_value(motor, "velocity_a", clamp(va))
+        Robot.set_value(motor, "velocity_b", clamp(vb))
+
+    def stop():
+        drive(0.0, 0.0)
+
+    Robot.set_value(motor, "invert_a",      True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+
+    # ── PID constants ─────────────────────────────────────────────────────────
+    Kp = 0.6
+    Ki = 0.0
+    Kd = 0.10
+
+    dt         = 0.02
+    base_speed = -0.5
+
+    # ── parking config ────────────────────────────────────────────────────────
+    PARK_AFTER     = 22.0   # seconds of line-following before parking
+    PARK_DRIVE_T   =  1.5   # tune this on the field
+    PARK_SPEED     = -0.3
+
+    # ── state ─────────────────────────────────────────────────────────────────
+    last_error     = 0.0
+    integral       = 0.0
+    last_side      = 0      # -1 = line was left, +1 = line was right
+    RECOVERY_SPEED = 0.25
+    t_start        = Robot.get_time()
+
+    # == PHASE 1 - line following ==============================================
+    while True:
+        if Robot.get_time() - t_start >= PARK_AFTER:
+            break
+
+        l, c, r = read3()
+
+        l_on = l > L_THRESH
+        c_on = c > C_THRESH
+        r_on = r > R_THRESH
+
+        # track which side the line is on before we might lose it
+        if l_on and not r_on:
+            last_side = -1
+        elif r_on and not l_on:
+            last_side = +1
+
+        # lost-line recovery
+        if not l_on and not c_on and not r_on:
+            if last_side >= 0:
+                drive(-RECOVERY_SPEED,  RECOVERY_SPEED)  # spin right
+            else:
+                drive( RECOVERY_SPEED, -RECOVERY_SPEED)  # spin left
+            Robot.sleep(dt)
+            continue
+
+        # weighted blended error across all active sensors
+        active_err = 0.0
+        active_w   = 0.0
+        if l_on:
+            active_err += (l - L_TARGET) * -0.5
+            active_w   += 0.5
+        if c_on:
+            active_err += (c - C_TARGET) *  1.0
+            active_w   += 1.0
+        if r_on:
+            active_err += (r - R_TARGET) *  0.5
+            active_w   += 0.5
+
+        error = active_err / active_w if active_w > 0 else 0.0
+
+        integral   = clamp(integral + error * dt, -0.3, 0.3)
+        derivative = (error - last_error) / dt
+        correction = Kp * error + Ki * integral + Kd * derivative
+
+        drive(base_speed + correction, base_speed - correction)
+
+        last_error = error
+        Robot.sleep(dt)
+
+    # == PHASE 2 - park ========================================================
+    stop()
+    Robot.sleep(0.1)
+    drive(PARK_SPEED, PARK_SPEED)
+    Robot.sleep(PARK_DRIVE_T)
+    stop()
+
+
+def teleop():
+    Robot.set_value(motor, "invert_a",      True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+
+    while True:
+        if Gamepad.get_value(forward):
+            Robot.set_value(motor, "velocity_a", 1)
+            Robot.set_value(motor, "velocity_b", 1)
+            if Gamepad.get_value(left):
+                Robot.set_value(motor, "velocity_a", 1)
+                Robot.set_value(motor, "velocity_b", 0.2)
+            if Gamepad.get_value(right):
+                Robot.set_value(motor, "velocity_a", 0.2)
+                Robot.set_value(motor, "velocity_b", 1)
+        elif Gamepad.get_value(left):
+            Robot.set_value(motor, "velocity_b", -1)
+            Robot.set_value(motor, "velocity_a",  1)
+        elif Gamepad.get_value(right):
+            Robot.set_value(motor, "velocity_a", -1)
+            Robot.set_value(motor, "velocity_b",  1)
+        elif Gamepad.get_value(backward):
+            Robot.set_value(motor, "velocity_a", -1)
+            Robot.set_value(motor, "velocity_b", -1)
+        else:
+            Robot.set_value(motor, "velocity_a", 0)
+            Robot.set_value(motor, "velocity_b", 0)
+
+        Robot.sleep(0.2)
