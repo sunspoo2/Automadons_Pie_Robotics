@@ -1,0 +1,149 @@
+motor  = "6_948929816730218549"
+sensor = "2_2564895989332655657"
+crane  = "6_13507231519301190666"
+
+backward = "dpad_up"
+left     = "dpad_left"
+forward  = "dpad_down"
+right    = "dpad_right"
+up       = "button_y"
+down     = "button_a"
+
+LEFT_CH   = "left"
+CENTER_CH = "center"
+RIGHT_CH  = "right"
+
+
+def autonomous():
+    Robot.set_value(motor, "invert_a",      True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+ 
+    C_THRESH = 0.35
+    L_THRESH = 0.25
+    R_THRESH = 0.25
+ 
+    base = -0.2
+    turn =  0.15
+    spin =  0.20
+ 
+    last_side    = 0
+    PARK_DRIVE_T = 1.5
+ 
+    # creep forward slowly until we find the line
+    Robot.set_value(motor, "velocity_a", base)
+    Robot.set_value(motor, "velocity_b", base)
+    while True:
+        l = Robot.get_value(sensor, "left")   or 0.0
+        c = Robot.get_value(sensor, "center") or 0.0
+        r = Robot.get_value(sensor, "right")  or 0.0
+        if l > L_THRESH or c > C_THRESH or r > R_THRESH:
+            break
+        Robot.sleep(0.02)
+ 
+    # found the line, speed up for following
+    base = -0.5
+ 
+    # follow the line
+    while True:
+        l = Robot.get_value(sensor, "left")   or 0.0
+        c = Robot.get_value(sensor, "center") or 0.0
+        r = Robot.get_value(sensor, "right")  or 0.0
+ 
+        l_on = l > L_THRESH
+        c_on = c > C_THRESH
+        r_on = r > R_THRESH
+ 
+        if l_on and not r_on:
+            last_side = -1
+        elif r_on and not l_on:
+            last_side = +1
+ 
+        if c_on:
+            Robot.set_value(motor, "velocity_a", base)
+            Robot.set_value(motor, "velocity_b", base)
+        elif l_on and not r_on:
+            Robot.set_value(motor, "velocity_a", base - turn)
+            Robot.set_value(motor, "velocity_b", base)
+        elif r_on and not l_on:
+            Robot.set_value(motor, "velocity_a", base)
+            Robot.set_value(motor, "velocity_b", base + turn)
+        else:
+            if last_side == -1:
+                Robot.set_value(motor, "velocity_a",  spin)
+                Robot.set_value(motor, "velocity_b", -spin)
+            else:
+                Robot.set_value(motor, "velocity_a", -spin)
+                Robot.set_value(motor, "velocity_b",  spin)
+ 
+        Robot.sleep(0.02)
+ 
+    # park
+    Robot.set_value(motor, "velocity_a", base)
+    Robot.set_value(motor, "velocity_b", base)
+    Robot.sleep(PARK_DRIVE_T)
+    Robot.set_value(motor, "velocity_a", 0)
+    Robot.set_value(motor, "velocity_b", 0)
+        
+def teleop():
+    Robot.set_value(motor, "invert_a", True)
+    Robot.set_value(motor, "pid_enabled_a", False)
+    Robot.set_value(motor, "pid_enabled_b", False)
+    Robot.set_value(crane, "invert_a", True)
+    Robot.set_value(crane, "pid_enabled_a", False)
+    while True:
+        # drive
+        if Gamepad.get_value(forward):
+            if Gamepad.get_value(left):
+                # forward + left
+                Robot.set_value(motor, "velocity_a", 1)
+                Robot.set_value(motor, "velocity_b", 0.7)
+            elif Gamepad.get_value(right):
+                # forward + right
+                Robot.set_value(motor, "velocity_a", 0.7)
+                Robot.set_value(motor, "velocity_b", 1)
+            else:
+                # forward only
+                Robot.set_value(motor, "velocity_a", 1)
+                Robot.set_value(motor, "velocity_b", 1)
+
+        elif Gamepad.get_value(backward):
+            if Gamepad.get_value(left):
+                # backward + left
+                Robot.set_value(motor, "velocity_a", -0.2)
+                Robot.set_value(motor, "velocity_b", -1)
+            elif Gamepad.get_value(right):
+                # backward + right
+                Robot.set_value(motor, "velocity_a", -1)
+                Robot.set_value(motor, "velocity_b", -0.2)
+            else:
+                # backward only
+                Robot.set_value(motor, "velocity_a", -1)
+                Robot.set_value(motor, "velocity_b", -1)
+
+        elif Gamepad.get_value(left):
+            # spin left i0l........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................n place
+            Robot.set_value(motor, "velocity_a",  1)
+            Robot.set_value(motor, "velocity_b", -1)
+
+        elif Gamepad.get_value(right):
+            # spin right in place
+            Robot.set_value(motor, "velocity_a", -1)
+            Robot.set_value(motor, "velocity_b",  1)
+
+        else:
+            Robot.set_value(motor, "velocity_a", 0)
+            Robot.set_value(motor, "velocity_b", 0)
+
+        # crane
+        if Gamepad.get_value(up):
+            Robot.set_value(crane, "velocity_a",  0.5)
+            print(1)
+        elif Gamepad.get_value(down):
+            Robot.set_value(crane, "velocity_a", -0.5)
+            print(-1)
+        else:
+            Robot.set_value(crane, "velocity_a",  0)
+            print(0)
+
+        Robot.sleep(0.2)
